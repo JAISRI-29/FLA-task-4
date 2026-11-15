@@ -1,0 +1,515 @@
+"""
+Finite Automata for Real-Time Input Validation
+CLA-2 - Task 2
+
+Usage:
+python3 fa_validators.py pin 4821
+python3 fa_validators.py lock WWC
+python3 fa_validators.py password Srm2026abc
+python3 fa_validators.py email a@b.co
+python3 fa_validators.py tests
+"""
+
+import sys
+import re
+from collections import deque
+
+
+# ======================= DFA CLASS =======================
+
+class DFA:
+    def __init__(self, states, alphabet, delta, start, accepting, name=""):
+        self.states = list(states)
+        self.alphabet = list(alphabet)
+        self.delta = delta
+        self.start = start
+        self.accepting = set(accepting)
+        self.name = name
+
+    def step(self, state, symbol):
+        return self.delta[(state, symbol)]
+
+    def run(self, word):
+        state = self.start
+        for symbol in word:
+            state = self.step(state, symbol)
+        return state
+
+    def accepts(self, word):
+        return self.run(word) in self.accepting
+
+    def trace(self, word):
+        state = self.start
+        rows = []
+
+        for symbol in word:
+            next_state = self.step(state, symbol)
+            rows.append((state, symbol, next_state))
+            state = next_state
+
+        return rows, state in self.accepting
+
+    def dead_states(self):
+        live = set(self.accepting)
+        changed = True
+
+        while changed:
+            changed = False
+            for (state, symbol), target in self.delta.items():
+                if target in live and state not in live:
+                    live.add(state)
+                    changed = True
+
+        return set(self.states) - live
+
+
+# ======================= DFA BUILDER =======================
+
+def build_dfa(start, alphabet, step, is_acc, name=""):
+    seen = {start}
+    order = [start]
+    delta = {}
+    queue = deque([start])
+
+    while queue:
+        state = queue.popleft()
+
+        for symbol in alphabet:
+            target = step(state, symbol)
+            delta[(state, symbol)] = target
+
+            if target not in seen:
+                seen.add(target)
+                order.append(target)
+                queue.append(target)
+
+    accepting = [s for s in order if is_acc(s)]
+
+    return DFA(order, alphabet, delta, start, accepting, name)
+
+
+# ======================= PRODUCT CONSTRUCTION =======================
+
+def product(dfas, name=""):
+    alphabet = dfas[0].alphabet
+
+    return build_dfa(
+        tuple(d.start for d in dfas),
+        alphabet,
+        lambda states, a: tuple(
+            d.delta[(s, a)] for d, s in zip(dfas, states)
+        ),
+        lambda states: all(
+            s in d.accepting for d, s in zip(dfas, states)
+        ),
+        name
+    )
+
+
+# ======================= DFA MINIMISATION =======================
+
+def minimise(dfa):
+    block = {
+        state: (state in dfa.accepting)
+        for state in dfa.states
+    }
+
+    while True:
+        signatures = {
+            state: (
+                block[state],
+                *tuple(
+                    block[dfa.delta[(state, a)]]
+                    for a in dfa.alphabet
+                )
+            )
+            for state in dfa.states
+        }
+
+        ids = {}
+        new_block = {}
+
+        for state in dfa.states:
+            new_block[state] = ids.setdefault(
+                signatures[state], len(ids)
+            )
+
+        if len(set(new_block.values())) == len(set(block.values())):
+            block = new_block
+            break
+
+        block = new_block
+
+    order = []
+    seen = set()
+    queue = deque([block[dfa.start]])
+
+    representatives = {}
+
+    for state in dfa.states:
+        representatives.setdefault(block[state], state)
+
+    while queue:
+        b = queue.popleft()
+
+        if b in seen:
+            continue
+
+        seen.add(b)
+        order.append(b)
+
+        for a in dfa.alphabet:
+            target = dfa.delta[(representatives[b], a)]
+            queue.append(block[target])
+
+    dead = {block[s] for s in dfa.dead_states()}
+    live_order = [b for b in order if b not in dead]
+
+    names = {
+        b: f"m{i}"
+        for i, b in enumerate(live_order)
+    }
+
+    names.update({b: "trap" for b in dead})
+
+    delta = {
+        (names[b], a): names[
+            block[dfa.delta[(representatives[b], a)]]
+        ]
+        for b in order
+        for a in dfa.alphabet
+    }
+
+    accepting = [
+        names[b]
+        for b in order
+        if representatives[b] in dfa.accepting
+    ]
+
+    return DFA(
+        [names[b] for b in order],
+        dfa.alphabet,
+        delta,
+        names[block[dfa.start]],
+        accepting,
+        dfa.name + " (min)"
+    )
+
+
+# ======================= NFA CLASS =======================
+
+class NFA:
+    def __init__(self, states, alphabet, delta, start, accepting):
+        self.states = states
+        self.alphabet = alphabet
+        self.delta = delta
+        self.start = start
+        self.accepting = set(accepting)
+
+    def accepts(self, word):
+        current = {self.start}
+
+        for symbol in word:
+            current = set().union(
+                *[
+                    self.delta.get((s, symbol), set())
+                    for s in current
+                ]
+            ) if current else set()
+
+        return bool(current & self.accepting)
+
+    def to_dfa(self):
+        step = lambda states, a: frozenset().union(
+            *[
+                self.delta.get((s, a), set())
+                for s in states
+            ]
+        )
+
+        return build_dfa(
+            frozenset([self.start]),
+            self.alphabet,
+            step,
+            lambda states: bool(states & self.accepting),
+            "Subset construction DFA"
+        )
+
+
+# ======================= INPUT CLASSIFIERS =======================
+
+def pin_class(char):
+    return 'D' if '0' <= char <= '9' else 'O'
+
+
+def pw_class(char):
+    if 'A' <= char <= 'Z':
+        return 'U'
+    if 'a' <= char <= 'z':
+        return 'L'
+    if '0' <= char <= '9':
+        return 'D'
+    if char.isspace():
+        return 'W'
+    return 'S'
+
+
+def em_class(char):
+    if char.isascii() and char.isalpha():
+        return 'L'
+    if '0' <= char <= '9':
+        return 'D'
+
+    return {
+        '.': 'DOT',
+        '-': 'HY',
+        '_': 'US',
+        '+': 'PL',
+        '@': 'AT'
+    }.get(char, 'O')
+
+
+# ======================= APPLICATION 1: PIN =======================
+
+PIN_SIGMA = ['D', 'O']
+
+
+def make_pin(n=4):
+    def step(state, symbol):
+        if state == 'trap' or symbol == 'O' or state == n:
+            return 'trap'
+        return state + 1
+
+    return build_dfa(
+        0,
+        PIN_SIGMA,
+        step,
+        lambda state: state == n,
+        f"PIN DFA ({n} digits)"
+    )
+
+
+# ======================= APPLICATION 2: CARD LOCK =======================
+
+LOCK_SIGMA = ['C', 'W']
+
+
+def make_lock():
+    transitions = {
+        ('w0', 'C'): 'w0',
+        ('w0', 'W'): 'w1',
+        ('w1', 'C'): 'w0',
+        ('w1', 'W'): 'w2',
+        ('w2', 'C'): 'w0',
+        ('w2', 'W'): 'LOCKED',
+        ('LOCKED', 'C'): 'LOCKED',
+        ('LOCKED', 'W'): 'LOCKED'
+    }
+
+    return DFA(
+        ['w0', 'w1', 'w2', 'LOCKED'],
+        LOCK_SIGMA,
+        transitions,
+        'w0',
+        ['w0', 'w1', 'w2'],
+        "Card Lock DFA"
+    )
+
+
+# ======================= APPLICATION 3: PASSWORD =======================
+
+PW_SIGMA = ['U', 'L', 'D', 'S', 'W']
+PW_MIN = 8
+PW_MAX = 12
+
+
+def pw_components():
+    length = build_dfa(
+        0,
+        PW_SIGMA,
+        lambda n, a: min(n + 1, PW_MAX + 1),
+        lambda n: PW_MIN <= n <= PW_MAX,
+        "Password length 8-12"
+    )
+
+    def has(cls):
+        return build_dfa(
+            0,
+            PW_SIGMA,
+            lambda s, a: 1 if (s or a == cls) else 0,
+            lambda s: s == 1,
+            f"Contains {cls}"
+        )
+
+    nospace = build_dfa(
+        0,
+        PW_SIGMA,
+        lambda s, a: 1 if (s or a == 'W') else 0,
+        lambda s: s == 0,
+        "No whitespace"
+    )
+
+    return [
+        length,
+        has('U'),
+        has('L'),
+        has('D'),
+        nospace
+    ]
+
+
+def make_password():
+    components = pw_components()
+    combined = product(components, "Password Product DFA")
+
+    return components, combined, minimise(combined)
+
+
+# ======================= APPLICATION 4: EMAIL =======================
+
+EM_SIGMA = ['L', 'D', 'DOT', 'HY', 'US', 'PL', 'AT', 'O']
+
+
+def make_email_nfa():
+    transitions = {}
+
+    def add(state, symbols, target):
+        for symbol in symbols:
+            transitions.setdefault((state, symbol), set()).add(target)
+
+    add('e0', ['L', 'D'], 'e1')
+    add('e1', ['L', 'D'], 'e1')
+    add('e1', ['DOT', 'HY', 'US', 'PL'], 'e2')
+    add('e1', ['AT'], 'e3')
+    add('e2', ['L', 'D'], 'e1')
+
+    add('e3', ['L', 'D'], 'e4')
+    add('e4', ['L', 'D'], 'e4')
+    add('e4', ['HY'], 'e5')
+    add('e4', ['DOT'], 'e3')
+    add('e4', ['DOT'], 'e6')
+
+    add('e5', ['HY'], 'e5')
+    add('e5', ['L', 'D'], 'e4')
+
+    add('e6', ['L'], 'e7')
+    add('e7', ['L'], 'e8')
+    add('e8', ['L'], 'e8')
+
+    return NFA(
+        [f"e{i}" for i in range(9)],
+        EM_SIGMA,
+        transitions,
+        'e0',
+        ['e8']
+    )
+
+
+EMAIL_RE = re.compile(
+    r'[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@'
+    r'(?:[A-Za-z0-9]+(?:-+[A-Za-z0-9]+)*\.)+'
+    r'[A-Za-z]{2,}'
+)
+
+
+# ======================= DISPLAY TRACE =======================
+
+def show_trace(dfa, word, classify):
+    classes = [
+        classify(char) if classify else char
+        for char in word
+    ]
+
+    rows, accepted = dfa.trace(classes)
+
+    print(f"\n{dfa.name} on {word!r}")
+    print("-" * 45)
+
+    for i, ((state, symbol, target), char) in enumerate(
+        zip(rows, word), 1
+    ):
+        print(
+            f"{i:>3}. d({state}, {char!r} -> "
+            f"{symbol}) = {target}"
+        )
+
+    final_state = rows[-1][2] if rows else dfa.start
+
+    print("-" * 45)
+    print("Final state:", final_state)
+    print("Result:", "ACCEPTED" if accepted else "REJECTED")
+
+    return accepted
+
+
+# ======================= TEST CASES =======================
+
+def run_tests():
+    print("\n========== AUTOMATA TESTING ==========")
+
+    pin = make_pin()
+
+    print("\nPIN TESTS")
+    for word in ["4821", "123", "12345", "12a4"]:
+        print(word, ":", "PASS" if pin.accepts(
+            [pin_class(c) for c in word]
+        ) else "FAIL")
+
+    lock = make_lock()
+
+    print("\nCARD LOCK TESTS")
+    for word in ["WWC", "WCW", "WWW", "WWWW"]:
+        print(word, ":", "PASS" if lock.accepts(word) else "FAIL")
+
+    _, _, password = make_password()
+
+    print("\nPASSWORD TESTS")
+    for word in ["Srm2026abc", "password", "SRM2026", "Abc12345"]:
+        result = password.accepts([pw_class(c) for c in word])
+        print(word, ":", "PASS" if result else "FAIL")
+
+    email = minimise(make_email_nfa().to_dfa())
+
+    print("\nEMAIL TESTS")
+    for word in ["a@b.co", "abc@gmail.com", "invalid", "a@b.c"]:
+        result = email.accepts([em_class(c) for c in word])
+        print(word, ":", "PASS" if result else "FAIL")
+
+    print("\n========== TESTING COMPLETED ==========")
+
+
+# ======================= MAIN PROGRAM =======================
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__)
+        return
+
+    command = argv[1]
+    word = argv[2] if len(argv) > 2 else ""
+
+    if command == "pin":
+        show_trace(make_pin(), word, pin_class)
+
+    elif command == "lock":
+        show_trace(make_lock(), word, None)
+
+    elif command == "password":
+        show_trace(make_password()[2], word, pw_class)
+
+    elif command == "email":
+        show_trace(
+            minimise(make_email_nfa().to_dfa()),
+            word,
+            em_class
+        )
+
+    elif command == "tests":
+        run_tests()
+
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
